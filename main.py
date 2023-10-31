@@ -4,7 +4,7 @@ from pylab import plt
 from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
-def load_data(stock, look_back, look_forward):
+def load_data(stock, look_back, look_forward, batchsize =1):
     data_raw = stock.values  # convert to numpy array
     data = []
 
@@ -17,8 +17,8 @@ def load_data(stock, look_back, look_forward):
     test_set_size = int(np.round(0.25 * data.shape[0]))
     train_set_size = data.shape[0] - (test_set_size)
 
-    x_train = data[:train_set_size, :-look_forward, :]
-    y_train = data[:train_set_size, -look_forward:, :]
+    x_train_temp = data[:train_set_size, :-look_forward, :]
+    y_train_temp = data[:train_set_size, -look_forward:, :]
 
     x_validation = data[train_set_size+2*look_back :-1, :-look_forward, :]
     y_validation = data[train_set_size+2*look_back :-1, -look_forward:, :]
@@ -26,8 +26,16 @@ def load_data(stock, look_back, look_forward):
     x_test = data[-1, :-look_forward, :]
     y_test = data[-1, -look_forward:, :]
 
+    x_train = []
+    y_train = []
 
-    return [x_train, y_train, x_test, y_test, x_validation, y_validation]
+    for i in range(0,  len(x_train_temp), batchsize):
+        x_train.append(x_train_temp[i:i+batchsize,:,:])
+        y_train.append(y_train_temp[i:i+batchsize,:,:])
+
+    x_train =x_train[:-1]
+    y_train =y_train[:-1]
+    return [np.array(x_train), np.array(y_train), np.array(x_test), np.array(y_test), np.array(x_validation), np.array(y_validation)]
 
 
 class LSTM(nn.Module):
@@ -85,6 +93,7 @@ if __name__ == "__main__":
     look_back = 60  # choose sequence length
     look_forward = 10
     x_train, y_train , x_test, y_test , x_validation, y_validation= load_data(df_stockIndex, look_back, look_forward)
+
     print('x_train.shape = ', x_train.shape)
     print('y_train.shape = ', y_train.shape)
     print('x_test.shape = ', x_test.shape)
@@ -107,33 +116,36 @@ if __name__ == "__main__":
     optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
 
     print(x_train.shape, x_test.shape)
-    num_epochs = 150
-    hist = np.zeros(num_epochs)
+    num_epochs =10
+
+    hist = np.zeros(num_epochs*len(x_train))
+
     validation = np.zeros(num_epochs)
 
     # Number of steps to unroll
-
     cuda0 = torch.device(0)
     for t in range(num_epochs):
-        y_train_pred = model(x_train.to(cuda0))
+        for i in range(len(x_train)):
+            # Initialise hidden state
+            # Don't do this if you want your LSTM to be stateful
+            y_train_pred = model(x_train[i].to(cuda0))
 
-        loss = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1),y_train)
+            loss = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1),y_train[i])
 
-        hist[t] = loss.item()
+            hist[t*len(x_train)+i] = loss.item()
 
-        optimiser.zero_grad()
+            optimiser.zero_grad()
 
-                # Backward pass
-        loss.backward()
+                    # Backward pass
+            loss.backward()
 
-                # Update parameters
-        optimiser.step()
+                    # Update parameters
+            optimiser.step()
 
-        y_train_pred = model(x_validation.to(cuda0))
-        validation[t] = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1),y_validation).item()
+            y_train_pred = model(x_validation.to(cuda0))
+            validation[t] = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1), y_validation).item()
 
-        if t % 10 == 0 and t != 0:
-            print("Epoch ", t, "MSE: ", loss.item(), "Validation: ", validation[t].item())
+        print("Epoch ", t, "MSE: ", hist[t*len(x_train)], "Validation: ", validation[t].item())
 
         # Zero out gradient, else they will accumulate between epochs
 
