@@ -5,6 +5,7 @@ from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
 def load_data(stock, look_back, look_forward, batchsize =1):
+
     data_raw = stock.values  # convert to numpy array
     data = []
 
@@ -15,27 +16,54 @@ def load_data(stock, look_back, look_forward, batchsize =1):
     data = np.array(data)
 
     test_set_size = int(np.round(0.25 * data.shape[0]))
+    if(test_set_size<2*look_back+10 ):
+        test_set_size = 2*look_back+10
     train_set_size = data.shape[0] - (test_set_size)
 
-    x_train_temp = data[:train_set_size, :-look_forward, :]
-    y_train_temp = data[:train_set_size, -look_forward:, :]
 
-    x_validation = data[train_set_size+2*look_back :-1, :-look_forward, :]
-    y_validation = data[train_set_size+2*look_back :-1, -look_forward:, :]
 
-    x_test = data[-1, :-look_forward, :]
-    y_test = data[-1, -look_forward:, :]
 
-    x_train = []
+
+    x_train = data[:train_set_size-look_back, :-look_forward, :]
+    y_train = data[:train_set_size-look_back, -look_forward:, :]
+    indices = torch.randperm(x_train.shape[0])
+
+    x_train_temp = x_train[indices]
+    y_train = y_train[indices]
+    y_train_temp = np.zeros((y_train.shape[0],1))
+
+    for i in range(y_train_temp.shape[0]):
+        y_train_temp[i][0] = y_train[i].mean()
+
     y_train = []
+    x_train=[]
+    for i in range(0,x_train_temp.shape[0], batchsize):
+        x_train.append(x_train_temp[i:i+batchsize])
+        y_train.append( y_train_temp[i:i+batchsize])
 
-    for i in range(0,  len(x_train_temp), batchsize):
-        x_train.append(x_train_temp[i:i+batchsize,:,:])
-        y_train.append(y_train_temp[i:i+batchsize,:,:])
+    y_train = np.array(y_train[:-1])
+    x_train = np.array(x_train[:-1])
 
-    x_train =x_train[:-1]
-    y_train =y_train[:-1]
-    return [np.array(x_train), np.array(y_train), np.array(x_test), np.array(y_test), np.array(x_validation), np.array(y_validation)]
+
+    x_validation = data[train_set_size :-2*look_back, :-look_forward, :]
+    y_validation_temp = data[train_set_size :-2*look_back, -look_forward:, :]
+    y_validation = np.zeros((y_validation_temp.shape[0], 1))
+
+    for i in range(y_validation_temp.shape[0]):
+        y_validation[i][0] = y_validation_temp[i].mean()
+
+
+
+
+    x_test = data[-look_back:, :-look_forward, :]
+    y_test_temp = data[-look_back:, -look_forward:, :]
+
+    y_test = np.zeros((y_test_temp.shape[0], 1))
+    for i in range(y_test_temp.shape[0]):
+        y_test[i][0] = y_test_temp[i].mean()
+
+
+    return [x_train, y_train, x_test, y_test, x_validation, y_validation, y_test_temp]
 
 
 class LSTM(nn.Module):
@@ -80,20 +108,19 @@ if __name__ == "__main__":
     df1 = pd.DataFrame(index=dates)
     df_stockIndex = pd.read_csv("./kaggle/Data/Stocks/us100.us.txt", parse_dates=True, index_col=0)
     df_stockIndex = df1.join(df_stockIndex)
-    df_stockIndex[['Close']].plot(figsize=(15, 6))
-    plt.ylabel("stock_price")
-    plt.title("NASDAQ Stock")
-    plt.show()
+    # df_stockIndex[['Close']].plot(figsize=(15, 6))
+    # plt.ylabel("stock_price")
+    # plt.title("NASDAQ Stock")
+    # plt.show()
     df_stockIndex = df_stockIndex[['Close']]
     df_stockIndex = df_stockIndex.ffill()
     scaler = MinMaxScaler(feature_range=(-1, 1))
 
     df_stockIndex['Close'] = scaler.fit_transform(df_stockIndex['Close'].values.reshape(-1, 1))
 
-    look_back = 60  # choose sequence length
-    look_forward = 10
-    x_train, y_train , x_test, y_test , x_validation, y_validation= load_data(df_stockIndex, look_back, look_forward)
-
+    look_back = 365  # choose sequence length
+    look_forward = 5
+    x_train, y_train , x_test, y_test , x_validation, y_validation , y_real= load_data(df_stockIndex, look_back, look_forward)
     print('x_train.shape = ', x_train.shape)
     print('y_train.shape = ', y_train.shape)
     print('x_test.shape = ', x_test.shape)
@@ -110,7 +137,7 @@ if __name__ == "__main__":
     input_dim = 1
     hidden_dim = 128
     num_layers = 2
-    output_dim = look_forward
+    output_dim = 1
     model = LSTM(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_layers=num_layers)
     loss_fn = torch.nn.MSELoss()
     optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -120,7 +147,7 @@ if __name__ == "__main__":
 
     hist = np.zeros(num_epochs*len(x_train))
 
-    validation = np.zeros(num_epochs)
+    validation = np.zeros(num_epochs*len(x_train))
 
     # Number of steps to unroll
     cuda0 = torch.device(0)
@@ -143,7 +170,7 @@ if __name__ == "__main__":
             optimiser.step()
 
             y_train_pred = model(x_validation.to(cuda0))
-            validation[t] = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1), y_validation).item()
+            validation[t*len(x_train)+i] = loss_fn(torch.unsqueeze(y_train_pred.cpu(), -1), y_validation).item()
 
         print("Epoch ", t, "MSE: ", hist[t*len(x_train)], "Validation: ", validation[t].item())
 
@@ -174,13 +201,19 @@ if __name__ == "__main__":
     print(y_test.shape)
     print(df_stockIndex[:].index.shape)
 
-    axes.plot(df_stockIndex[-y_test.shape[0]:].index, y_test, color='red', label='Real NASDQ Index Price')
     axes.plot(df_stockIndex[-y_test.shape[0]:].index, y_test_pred, color='blue',
-              label='Predicted IBM Stock Price')
+              label='Predicted mean NASDAQ Index Price')
+
+    df_stockIndex['Close'] = scaler.inverse_transform(df_stockIndex['Close'].values.reshape(-1, 1))
+    y_test = scaler.inverse_transform(y_test.detach().numpy().reshape(-1, 1))
+    y_real = scaler.inverse_transform(y_real.detach().numpy().reshape(-1, 1))
+    axes.plot(df_stockIndex[-y_test.shape[0]:].index, y_test, color='red', label='Real mean NASDQ Index Price')
+    axes.plot(df_stockIndex[-y_test.shape[0]:].index, df_stockIndex['Close'].values[-y_test.shape[0]:], color='green', label='Real NASDQ Index Price')
+
     # axes.xticks(np.arange(0,394,50))
-    plt.title('IBM Stock Price Prediction')
+    plt.title('NASDAQ Index Price Prediction')
     plt.xlabel('Time')
-    plt.ylabel('IBM Stock Price')
+    plt.ylabel('NASDAQ Index Price')
     plt.legend()
     plt.savefig('ibm_pred.png')
     plt.show()
